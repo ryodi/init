@@ -1,0 +1,4 @@
+# demonstrate "restart" capability
+
+# this will exit after 2 seconds...
+/Users/jhunt/code/init/scripts/sleeper
