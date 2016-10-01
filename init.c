@@ -102,6 +102,11 @@ struct child* configure(const char *path)
 	}
 
 	fclose(f);
+	if (!chain) {
+		fprintf(stderr, "%s: no commands defined.\nWhat shall I supervise?\n", path);
+		return NULL;
+	}
+
 	return chain;
 }
 
