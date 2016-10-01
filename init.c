@@ -176,7 +176,6 @@ int main(int argc, char **argv)
 
 	sa.sa_sigaction = reaper;
 	sa.sa_flags = SA_NOCLDSTOP | SA_SIGINFO;
-	sa.sa_mask  = 0; /* SIGCHLD will be blocked implicitly */
 	rc = sigaction(SIGCHLD, &sa, NULL);
 	if (rc != 0) {
 		fprintf(stderr, "failed to set up SIGCLD handler: %s\n", strerror(errno));
