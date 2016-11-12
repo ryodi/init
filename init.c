@@ -9,6 +9,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#define VERSION "1.0"
+
 /*
    `struct child` contains all of the details for each of the
    child processes that we are supervising.  Partially, this
@@ -167,6 +169,11 @@ int main(int argc, char **argv)
 	if (argc != 2) {
 		fprintf(stderr, "USAGE: %s /path/to/inittab\n", argv[0]);
 		return 1;
+	}
+
+	if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "version") == 0) {
+		printf("init v" VERSION ", Copyright (c) 2016 James Hunt\n");
+		return 0;
 	}
 
 	CONFIG = configure(argv[1]);
