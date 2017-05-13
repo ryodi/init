@@ -200,7 +200,19 @@ int main(int argc, char **argv)
 			tmp = tmp->next;
 		}
 
-		nanosleep(&nap, NULL);
+		while (nanosleep(&nap, NULL) == -1);
+
+		if (nap.tv_sec == 0) {
+			nap.tv_nsec += 100000000;
+			if (nap.tv_nsec >= 1000000000) {
+				nap.tv_sec = 1;
+				nap.tv_nsec %= 1000000000;
+			}
+
+		} else if (nap.tv_sec < 10) {
+			nap.tv_nsec = 0;
+			nap.tv_sec++;
+		}
 	}
 
 	return 0;
