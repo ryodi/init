@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/time.h>
 #include <dirent.h>
 #include <getopt.h>
 
@@ -164,7 +165,33 @@ void spin(struct child *config)
 		exit(42);
 
 	} else {
-		fprintf(stderr, "pid %d `%s`\n", config->pid, config->command);
+		int rc;
+		struct tm *tm;
+		struct timeval tv;
+#define _DATE_BUF_SIZE 64
+		char now[_DATE_BUF_SIZE];
+
+		rc = gettimeofday(&tv, NULL);
+		if (rc != 0) {
+			fprintf(stderr, "gettimeofday(): %s\n", strerror(errno));
+			strcpy(now, "UNKNOWN");
+
+		} else {
+			tm = localtime(&tv.tv_sec);
+			if (!tm) {
+				fprintf(stderr, "localtime(): %s\n", strerror(errno));
+				strcpy(now, "UNKNOWN");
+
+			} else {
+				rc = strftime(now, 64, "%Y-%m-%d %H:%M:%S", tm);
+				if (rc == 0) {
+					strcpy(now, "DATE-TOO-LONG");
+				} else {
+					snprintf(now+rc, _DATE_BUF_SIZE - rc, ".%06li", tv.tv_usec);
+				}
+			}
+		}
+		fprintf(stderr, "[%s] exec pid %d `%s`\n", now, config->pid, config->command);
 	}
 }
 
