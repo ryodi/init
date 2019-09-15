@@ -30,15 +30,17 @@ struct child {
 	struct child *next; /* the rest of the linked list */
 	                    /* (NULL at end-of-list)       */
 
+	int quiet;          /* send std* to /dev/null      */
+
 	char  *command;     /* command script to run       */
-	int    argc;        /* how many arguments to pass? */
 	char **argv;        /* the arguments to pass       */
+	char **envp;        /* the environment to use      */
 
 	pid_t pid;          /* PID of the running process. */
 	                    /* set to 0 for "not running"  */
 };
 
-void append_command(struct child **chain, struct child **next, char *command, int argc, char **argv) {
+void append_command(struct child **chain, struct child **next, char *command, int argc, char **argv, char **envp) {
 	int i;
 
 	if (*next == NULL) {
@@ -49,12 +51,14 @@ void append_command(struct child **chain, struct child **next, char *command, in
 		tmp->next = *next;
 	}
 
+	(*next)->quiet = 1;
 	(*next)->command = command;
 	(*next)->argv = calloc(argc + 1, sizeof(char *));
 	for (i = 0; i < argc; i++) {
 		(*next)->argv[i] = argv[i];
 	}
 	(*next)->argv[argc] = NULL;
+	(*next)->envp = envp;
 }
 
 struct child *last_child(struct child *head) {
@@ -64,7 +68,7 @@ struct child *last_child(struct child *head) {
 	return head;
 }
 
-int configure_from_argv(struct child **chain, int argc, char **argv) {
+int configure_from_argv(struct child **chain, int argc, char **argv, char **envp) {
 	int start, i, rc;
 	struct child *next;
 	char *p, *command;
@@ -76,7 +80,7 @@ int configure_from_argv(struct child **chain, int argc, char **argv) {
 				command = strdup(argv[start]);
 				p = strrchr(argv[start], '/');
 				if (p) memmove(argv[start], p+1, strlen(p));
-				append_command(chain, &next, command, i - start, argv+start);
+				append_command(chain, &next, command, i - start, argv+start, envp);
 			}
 			start = i + 1;
 			continue;
@@ -86,7 +90,7 @@ int configure_from_argv(struct child **chain, int argc, char **argv) {
 	return 0;
 }
 
-int configure_from_directory(struct child **chain, const char *root) {
+int configure_from_directory(struct child **chain, const char *root, char **envp) {
 	DIR *dir;
 	int rc, fd;
 	struct dirent *ent;
@@ -132,15 +136,14 @@ int configure_from_directory(struct child **chain, const char *root) {
 		}
 
 		argv[0] = strdup(ent->d_name);
-		append_command(chain, &next, strdup(buf), 1, argv);
+		append_command(chain, &next, strdup(buf), 1, argv, envp);
 	}
 
 	closedir(dir);
 	return 0;
 }
 
-void spin(struct child *config)
-{
+void spin(struct child *config) {
 	config->pid = fork();
 
 	if (config->pid < 0) {
@@ -149,20 +152,72 @@ void spin(struct child *config)
 	}
 
 	if (config->pid == 0) {
+		int saw_eaccess, rc, fd;
+		FILE *err;
+		char *p, *q, *path, abs[PATH_MAX], *f;
+
 		/* in child process; set up for an exec! */
-		char *argv[2] = { NULL, NULL };
-		char *envp[1] = { NULL };
-		argv[0] = strrchr(config->command, '/') + 1;
+		freopen("/dev/null", "r", stdin); /* we always do this */
 
-		freopen("/dev/null", "r", stdin);
-		freopen("/dev/null", "w", stdout);
-		freopen("/dev/null", "w", stderr);
+		if (config->quiet) {
+			/* first duplicate stderr as 'err' so we can still
+			   emit error messages to the terminal. */
+			fd = dup(fileno(stderr));
+			if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+			err = fd < 0 ? NULL : fdopen(fd, "w");
+			if (!err) {
+				fprintf(stderr, "unable to duplicate stderr.  don't expect much in the way of error reporting from here on out...\n");
+				err = stderr; /* it's going to get silenced anyway... */
+			}
 
-		execve(config->command, argv, envp);
-		/* uh-oh, exec failed (bad binary? non-executable?
-		   who knows!), and we can't error because we just
-		   redirected standard error to /dev/null. -_- */
-		exit(42);
+			/* then silence the "standard" descriptors. */
+			freopen("/dev/null", "w", stdout);
+			freopen("/dev/null", "w", stderr);
+		}
+
+		/* commands with slashes are relative-or-absolute
+		   paths, and should be execed straight away without
+		   consulting $PATH or a default $PATH.
+		 */
+		if (strchr(config->command, '/')) {
+			execve(config->command, config->argv, config->envp);
+			fprintf(err, "execve(%s) failed: %s\n", config->command, strerror(errno));
+			exit(-errno);
+		}
+
+		/* otherwise, we just keep ripping through $PATH
+		   and attempting an execve() until one works... */
+		path = getenv("PATH");
+		if (!path) path = "/usr/local/bin:/bin:/usr/bin";
+
+		saw_eaccess = 0;
+		for (p = path; *p; p = q) {
+			for (q = p; *q && *q != ':'; q++);
+
+			rc = snprintf(abs, PATH_MAX, "%.*s/%s", (int)(q - p), p, config->command);
+			if (rc >= PATH_MAX) {
+				fprintf(err, "'%.*s/%s' is too long of a file path name!\n", (int)(q - p), p, config->command);
+				exit(-ENAMETOOLONG);
+			}
+			q++;
+
+			execve(abs, config->argv, config->envp);
+			switch (errno) {
+			case EACCES: saw_eaccess = 1;
+			case ENOENT:
+			case ENOTDIR:
+				break;
+			default:
+				fprintf(err, "execve(%s) failed: %s\n", config->command, strerror(errno));
+				exit(-errno);
+			}
+		}
+		fprintf(err, "execve(%s) failed: executable not found in $PATH\n", config->command);
+		if (saw_eaccess) {
+			fprintf(err, "  additionally, the following error was encountered: %s\n", strerror(EACCES));
+			exit(-EACCES);
+		}
+		exit(1);
 
 	} else {
 		int rc;
@@ -226,7 +281,7 @@ void terminator(int sig, siginfo_t *info, void *_) {
 	fprintf(stderr, "init shutting down.\n");
 }
 
-int main(int argc, char **argv)
+int main(int argc, char **argv, char **envp)
 {
 	struct sigaction sa;
 	struct timespec nap;
@@ -285,16 +340,23 @@ int main(int argc, char **argv)
 			break;
 
 		case 'd':
-			rc = configure_from_directory(&CONFIG, optarg);
+			rc = configure_from_directory(&CONFIG, optarg, envp);
 			if (rc != 0) {
 				exit(1);
 			}
 			break;
 		}
 	}
-	rc = configure_from_argv(&CONFIG, argc - optind, argv + optind);
+	rc = configure_from_argv(&CONFIG, argc - optind, argv + optind, envp);
 	if (rc != 0) {
 		exit(1);
+	}
+
+	{
+		struct child *kid;
+		for (kid = CONFIG; kid; kid = kid->next) {
+				kid->quiet = quiet;
+		}
 	}
 
 	if (dry_run) {
@@ -311,7 +373,7 @@ int main(int argc, char **argv)
 		while (CONFIG) {
 			printf("%s: %s ", CONFIG->argv[0], CONFIG->command);
 
-			for (int i = 1; i < CONFIG->argc; i++) {
+			for (int i = 1; CONFIG->argv[i]; i++) {
 				char *p;
 				const char *q = "";
 				for (p = CONFIG->argv[i]; *p; p++) {
