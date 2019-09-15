@@ -66,5 +66,5 @@ About
 
 Everyone writes a supervisor, right?  It's like blog software was
 in the early aughts.  Why did I write this one?  I needed
-something small for Home Ports.  Yes, I know about openrc.  Yes, I
+something small for RYODI.  Yes, I know about openrc.  Yes, I
 know about supervisord.  I like this version.  Because I wrote it.
