@@ -199,16 +199,31 @@ static struct child *CONFIG;
 
 void reaper(int sig, siginfo_t *info, void *_)
 {
-	struct child *chain = CONFIG;
-	while (chain) {
-		if (chain->pid == info->si_pid) {
+	struct child *kid = CONFIG;
+	while (kid) {
+		if (kid->pid == info->si_pid) {
 			int rc;
-			waitpid(chain->pid, &rc, 0);
-			chain->pid = 0;
+			waitpid(kid->pid, &rc, 0);
+			kid->pid = 0;
 			break;
 		}
-		chain = chain->next; /* ooh! linked list! */
+		kid = kid->next;
 	}
+}
+
+static int RUNNING = 1;
+
+void terminator(int sig, siginfo_t *info, void *_) {
+	RUNNING = 0;
+	struct child *kid = CONFIG;
+	while (kid) {
+		if (kid->pid > 0) {
+			fprintf(stderr, "terminating pid %d...\n", kid->pid);
+			kill(SIGTERM, kid->pid);
+		}
+		kid = kid->next;
+	}
+	fprintf(stderr, "init shutting down.\n");
 }
 
 int main(int argc, char **argv)
@@ -326,10 +341,23 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	sa.sa_sigaction = terminator;
+	sa.sa_flags = SA_SIGINFO;
+	rc = sigaction(SIGINT, &sa, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "failed to set up SIGINT handler: %s\n", strerror(errno));
+		return 1;
+	}
+	rc = sigaction(SIGTERM, &sa, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "failed to set up SIGTERM handler: %s\n", strerror(errno));
+		return 1;
+	}
+
 #define ms(n) ((n) * 1000000)
 	nap.tv_sec = 0;
 	nap.tv_nsec = ms(100);
-	for (;;) {
+	while (RUNNING) {
 		struct child *tmp;
 		tmp = CONFIG;
 		while (tmp) {
