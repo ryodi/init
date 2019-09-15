@@ -14,7 +14,7 @@
 #include <dirent.h>
 #include <getopt.h>
 
-#define VERSION "1.0"
+#define VERSION "2.0"
 
 /*
    `struct child` contains all of the details for each of the
