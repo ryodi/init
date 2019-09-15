@@ -189,8 +189,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+#define ms(n) ((n) * 1000000)
 	nap.tv_sec = 0;
-	nap.tv_nsec = 100000000;
+	nap.tv_nsec = ms(100);
 	for (;;) {
 		struct child *tmp;
 		tmp = CONFIG;
@@ -203,10 +204,10 @@ int main(int argc, char **argv)
 		while (nanosleep(&nap, NULL) == -1);
 
 		if (nap.tv_sec == 0) {
-			nap.tv_nsec += 100000000;
-			if (nap.tv_nsec >= 1000000000) {
+			nap.tv_nsec += ms(100);
+			if (nap.tv_nsec >= ms(1000)) {
 				nap.tv_sec = 1;
-				nap.tv_nsec %= 1000000000;
+				nap.tv_nsec %= ms(1000);
 			}
 
 		} else if (nap.tv_sec < 10) {
@@ -214,6 +215,7 @@ int main(int argc, char **argv)
 			nap.tv_sec++;
 		}
 	}
+#undef ms
 
 	return 0;
 }
