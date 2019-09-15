@@ -7,7 +7,11 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/types.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <dirent.h>
+#include <getopt.h>
 
 #define VERSION "1.0"
 
@@ -25,93 +29,113 @@ struct child {
 	struct child *next; /* the rest of the linked list */
 	                    /* (NULL at end-of-list)       */
 
-	char *command;      /* command script to run       */
+	char  *command;     /* command script to run       */
+	int    argc;        /* how many arguments to pass? */
+	char **argv;        /* the arguments to pass       */
 
 	pid_t pid;          /* PID of the running process. */
 	                    /* set to 0 for "not running"  */
 };
 
-/*
-   Given the path to an inittab, parse the file and return a
-   heap-allocated `child` structure that contains all of the
-   pertinent details from the inittab.
+void append_command(struct child **chain, struct child **next, char *command, int argc, char **argv) {
+	int i;
 
-   Handles comments, blank lines, etc.
-
-   Any errors will cause the parsing to terminate, and a NULL
-   pointer will be returned.  (i.e. NULL = bad config)
- */
-struct child* configure(const char *path)
-{
-	FILE *f;
-	char buf[8192], *p, *q;
-	unsigned long line;
-	struct child *chain, *next;
-
-	f = fopen(path, "r");
-	if (!f) {
-		fprintf(stderr, "%s: %s\n", path, strerror(errno));
-		return NULL;
+	if (*next == NULL) {
+		*chain = *next = calloc(1, sizeof(struct child));
+	} else {
+		struct child *tmp = *next;
+		*next = calloc(1, sizeof(struct child));
+		tmp->next = *next;
 	}
 
-	line = 0;
-	chain = next = NULL;
-	while (fgets(buf, 8192, f) != NULL) {
-		line++;
-		p = strrchr(buf, '\n');
-		if (!p && buf[8190]) {
-			fprintf(stderr, "%s:%lu: line is too long!\n", path, line);
-			return NULL;
-		}
-		if (p)
-			*p = '\0';
+	(*next)->command = command;
+	(*next)->argv = calloc(argc + 1, sizeof(char *));
+	for (i = 0; i < argc; i++) {
+		(*next)->argv[i] = argv[i];
+	}
+	(*next)->argv[argc] = NULL;
+}
 
-		p = buf;
-		while (*p && isspace(*p))
-			p++;
-		if (!*p || *p == '#')
+struct child *last_child(struct child *head) {
+	while (head && head->next) {
+		head = head->next;
+	}
+	return head;
+}
+
+int configure_from_argv(struct child **chain, int argc, char **argv) {
+	int start, i, rc;
+	struct child *next;
+	char *p, *command;
+
+	next = last_child(*chain);
+	for (start = i = 0; i <= argc; i++) {
+		if (i == argc || strcmp(argv[i], "--") == 0) {
+			if (start != i) {
+				command = strdup(argv[start]);
+				p = strrchr(argv[start], '/');
+				if (p) memmove(argv[start], p+1, strlen(p));
+				append_command(chain, &next, command, i - start, argv+start);
+			}
+			start = i + 1;
 			continue;
-
-		if (*p != '/') {
-			fprintf(stderr, "%s:%lu: command '%s' must be absolutely qualified\n",
-			                path, line, p);
-			return NULL;
 		}
-
-		for (q = p; *q && !isspace(*q) && isprint(*q); q++)
-			;
-		if (*q) {
-			int pad = (int)(strlen(path) + (line / 10 + 1) + (q - p));
-			fprintf(stderr, "%s:%lu: command '%s' looks suspicious\n"
-			                "            %*s^~~ problem starts here...\n",
-			                path, line, p,
-			                pad, " ");
-			return NULL;
-		}
-
-		if (next == NULL) {
-			chain = next = calloc(1, sizeof(struct child));
-		} else {
-			struct child *tmp = next;
-			next = calloc(1, sizeof(struct child));
-			tmp->next = next;
-		}
-		next->command = strdup(p);
 	}
 
-	next = chain;
-	while (next) {
-		fprintf(stderr, "- [%s]\n", next->command);
-		next = next->next;
+	return 0;
+}
+
+int configure_from_directory(struct child **chain, const char *root) {
+	DIR *dir;
+	int rc, fd;
+	struct dirent *ent;
+	struct child *next;
+	char buf[PATH_MAX], *argv[2];
+	const char *sep;
+
+	rc = 0; fd = -1;
+	next = last_child(*chain);
+	sep = (*root && root[strlen(root)-1] == '/') ? "" : "/";
+
+	dir = opendir(root);
+	if (!dir) {
+		fprintf(stderr, "%s: %s\n", root, strerror(errno));
+		return -1;
+	}
+	fd = dirfd(dir);
+	if (fd < 0) {
+		fprintf(stderr, "dirfd(%s): %s\n", root, strerror(errno));
+		return -1;
 	}
 
-	fclose(f);
-	if (!chain) {
-		fprintf(stderr, "%s: no commands defined.\nWhat shall I supervise?\n", path);
-		return NULL;
+	while ((ent = readdir(dir)) != NULL) {
+		/* check the fstatat() to get executable regular files only */
+		struct stat st;
+		rc = fstatat(fd, ent->d_name, &st, 0);
+		if (rc < 0) {
+			fprintf(stderr, "fstat(%s%s%s): %s\n", root, sep, ent->d_name, strerror(errno));
+			return -1;
+		}
+		if (!S_ISREG(st.st_mode) || !(st.st_mode & 0111)) {
+			continue;
+		}
+
+		rc = snprintf(buf, PATH_MAX, "%s%s%s", root, sep, ent->d_name);
+		if (rc < 0) {
+			fprintf(stderr, "snprintf failed: %s\n", strerror(errno));
+			return -1;
+		}
+		if (rc >= PATH_MAX) {
+			fprintf(stderr, "snprintf failed: '%s/%s' exceeds PATH_MAX of %d\n", root, ent->d_name, PATH_MAX);
+			return -1;
+		}
+
+		argv[0] = strdup(ent->d_name);
+		append_command(chain, &next, strdup(buf), 1, argv);
 	}
 
-	return chain;
+	closedir(dir);
+	return 0;
 }
 
 void spin(struct child *config)
@@ -165,20 +189,106 @@ int main(int argc, char **argv)
 	struct sigaction sa;
 	struct timespec nap;
 	int rc;
+	int quiet = 0;
+	int dry_run = 0;
 
-	if (argc != 2) {
-		fprintf(stderr, "USAGE: %s /path/to/inittab\n", argv[0]);
-		return 1;
+	CONFIG = NULL;
+
+	for (;;) {
+		int c, idx = 0;
+		const char *shorts = "hvnqd:";
+		static struct option longs[] = {
+			{"help",       no_argument,       0,  'h' },
+			{"version",    no_argument,       0,  'v' },
+			{"dry-run",    no_argument,       0,  'n' },
+			{"quiet",      no_argument,       0,  'q' },
+			{"directory",  required_argument, 0,  'd' },
+			{0, 0, 0,  0 }
+		};
+
+		c = getopt_long(argc, argv, shorts, longs, &idx);
+		if (c == -1)
+			break;
+
+		switch (c) {
+		case 'h':
+			printf("Usage: init [options] [-- command --to -run [-- or --more]]\n"
+			       "Supervisor some processes, for Docker containers.\n"
+			       "\n"
+			       "  -h, --help       Print out a help screen.\n"
+			       "  -v, --version    Print out the version of `init`\n"
+			       "\n"
+			       "  -n, --dry-run    Parse and print commands to be run,\n"
+			       "                   but do not actually execute them.\n"
+			       "\n"
+			       "  -q, --quiet      Suppress output from a --dry-run.\n"
+			       "\n"
+			       "  -d, --directory  Process all regular executable files\n"
+			       "                   (and symbolic links to the same) in a\n"
+			       "                   given directory.  Can be used more\n"
+			       "                   than once.\n"
+			       "\n");
+			exit(0);
+
+		case 'v':
+			printf("init v" VERSION ", Copyright (c) 2016-2019 James Hunt\n");
+			exit(0);
+
+		case 'n':
+			dry_run = 1;
+			break;
+
+		case 'q':
+			quiet = 1;
+			break;
+
+		case 'd':
+			rc = configure_from_directory(&CONFIG, optarg);
+			if (rc != 0) {
+				exit(1);
+			}
+			break;
+		}
+	}
+	rc = configure_from_argv(&CONFIG, argc - optind, argv + optind);
+	if (rc != 0) {
+		exit(1);
 	}
 
-	if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "version") == 0) {
-		printf("init v" VERSION ", Copyright (c) 2016 James Hunt\n");
-		return 0;
+	if (dry_run) {
+		if (quiet) {
+			if (!CONFIG) exit(1);
+			exit(0);
+		}
+
+		if (!CONFIG) {
+			fprintf(stderr, "no processes to supervise.\n");
+			exit(1);
+		}
+
+		while (CONFIG) {
+			printf("%s: %s ", CONFIG->argv[0], CONFIG->command);
+
+			for (int i = 1; i < CONFIG->argc; i++) {
+				char *p;
+				const char *q = "";
+				for (p = CONFIG->argv[i]; *p; p++) {
+					if (isspace(*p)) {
+						q = "'";
+						break;
+					}
+				}
+				printf("%s%s%s ", q, CONFIG->argv[i], q);
+			}
+			printf("\n");
+			CONFIG = CONFIG->next;
+		}
+		exit(0);
 	}
 
-	CONFIG = configure(argv[1]);
 	if (!CONFIG) {
-		return 1;
+		fprintf(stderr, "No sub-processes identified.\nWhat shall I supervise?\n");
+		exit(1);
 	}
 
 	sa.sa_sigaction = reaper;

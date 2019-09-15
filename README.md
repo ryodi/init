@@ -21,22 +21,40 @@ not link in any libraries -- perfect for using in a Docker image!
 Usage
 -----
 
-`init` runs off of an `inittab` (yes, I stole these names from
-old-school -ahem- stable UNIX distributions, but since everyone is
-gaga over systemd, nobody should care, right?).
+`init` operates in one of two modes: command-line or
+directory-backed.
 
-An inittab is a configuration file that the `init` supervisor
-reads to figure out what to run.  Here's an example:
+In _command-line_ mode, `init` just reads the commands to execute
+from the arguments you pass to it.  For example:
 
-    # Start up the application server
-    /rc/app-server
+    init -- /path/to/bin/first-process --foreground \
+         -- /path/to/bin/second-process -f -l debug
 
-    # ... and the web server front-end (nginx)
-    /rc/web-server
+In _directory-backed_ mode, `init` reads a directory, looking for
+regular executable files (and symbolic links to the same) and
+executes those as commands, without any arguments:
 
-Commands must be given as absolute paths (start with a '/'), and
-cannot be passed arguments.  If you need to pass arguments, do
-that in a wrapper script and tell `init` about that wrapper.
+    # ls -l /services.d
+    total 8
+    -rwxr-xr-x 1 jhunt staff 2.1k Sep 15 17:43 daemon
+    -rwxr-xr-x 1 jhunt staff 2.3k Sep 15 17:43 worker
+
+    # init -d /services.d
+
+The `init` command itself takes the following options:
+
+  -h, --help       Print out a help screen.
+  -v, --version    Print out the version of `init`
+
+  -n, --dry-run    Parse and print commands to be run,
+                   but do not actually execute them.
+
+  -q, --quiet      Suppress output from a --dry-run.
+
+  -d, --directory  Process all regular executable files
+                   (and symbolic links to the same) in a
+                   given directory.  Can be used more
+                   than once.
 
 Contributing
 ------------
