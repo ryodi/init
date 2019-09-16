@@ -428,7 +428,9 @@ int main(int argc, char **argv, char **envp)
 			tmp = tmp->next;
 		}
 
-		while (nanosleep(&nap, NULL) == -1);
+		/* if we get an EINTR, and it was from a SIGTERM / SIGINT,
+		   then RUNNING should be falsish, and we wake up early. */
+		while (RUNNING && nanosleep(&nap, NULL) == -1);
 
 		if (nap.tv_sec == 0) {
 			nap.tv_nsec += ms(100);
