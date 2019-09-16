@@ -32,6 +32,9 @@ struct child {
 
 	int quiet;          /* send std* to /dev/null      */
 
+	char *name;         /* a unique name, for printing */
+	char *full;         /* full printable command line */
+
 	char  *command;     /* command script to run       */
 	char **argv;        /* the arguments to pass       */
 	char **envp;        /* the environment to use      */
@@ -75,8 +78,19 @@ const char * datetime() {
 }
 
 void append_command(struct child **chain, struct child **next, char *command, int argc, char **argv, char **envp) {
-	int i;
+	int i, n, dn;
+	struct child *kid;
 
+	/* determine our distinguishing number _before_ we
+	   append a new child struct to the chain. */
+	dn = 1;
+	for (kid = *chain; kid; kid = kid->next) {
+		if (strcasecmp(kid->argv[0], argv[0]) == 0) {
+			dn++;
+		}
+	}
+
+	/* allocate a new child struct in the chain. */
 	if (*next == NULL) {
 		*chain = *next = calloc(1, sizeof(struct child));
 	} else {
@@ -85,14 +99,58 @@ void append_command(struct child **chain, struct child **next, char *command, in
 		tmp->next = *next;
 	}
 
+	/* generate a unique name */
+	n = snprintf(NULL, 0, "%s/%d", argv[0], dn);
+	(*next)->name = calloc(n+1, sizeof(char));
+	snprintf((*next)->name, n+1, "%s/%d", argv[0], dn);
+
+	/* by default, all execs are quiet. */
 	(*next)->quiet = 1;
+
+	/* caller has gifted us this pointer. */
 	(*next)->command = command;
+
+	/* we may be given a subset of argv, based on argc;
+	   allocate a new list and copy the pointers in. */
 	(*next)->argv = calloc(argc + 1, sizeof(char *));
 	for (i = 0; i < argc; i++) {
 		(*next)->argv[i] = argv[i];
 	}
 	(*next)->argv[argc] = NULL;
+
+	/* for now, envp is not mucked with, so we can
+	   share a single environ between all of the kids. */
 	(*next)->envp = envp;
+
+	/* calculate the length of the full command */
+	n = strlen(command) + 1;
+	for (i = 1; (*next)->argv[i]; i++) {
+		char *p;
+		for (p = (*next)->argv[i]; *p; p++) {
+			if (isspace(*p)) {
+				n += 2; /* room for quotes... */
+				break;
+			}
+		}
+		n += strlen(argv[i]) + 1;
+	}
+	n--; /* remove trailing space */
+
+	/* format the full command */
+	(*next)->full = calloc(n+1, sizeof(char));
+	n = sprintf((*next)->full, "%s ", command);
+	for (i = 1; (*next)->argv[i]; i++) {
+		char *p;
+		const char *q = "";
+		for (p = (*next)->argv[i]; *p; p++) {
+			if (isspace(*p)) {
+				q = "'";
+				break;
+			}
+		}
+		n += sprintf((*next)->full+n, "%s%s%s ", q, (*next)->argv[i], q);
+	}
+	(*next)->full[n] = '\0';
 }
 
 struct child *last_child(struct child *head) {
@@ -215,7 +273,7 @@ void spin(struct child *config) {
 		 */
 		if (strchr(config->command, '/')) {
 			execve(config->command, config->argv, config->envp);
-			fprintf(err, "execve(%s) failed: %s\n", config->command, strerror(errno));
+			fprintf(err, "init | [%s] exec %s pid %d; execve(%s) failed: %s\n", datetime(), config->name, config->pid, config->command, strerror(errno));
 			exit(-errno);
 		}
 
@@ -230,7 +288,7 @@ void spin(struct child *config) {
 
 			rc = snprintf(abs, PATH_MAX, "%.*s/%s", (int)(q - p), p, config->command);
 			if (rc >= PATH_MAX) {
-				fprintf(err, "'%.*s/%s' is too long of a file path name!\n", (int)(q - p), p, config->command);
+				fprintf(err, "init | [%s] exec %s pid %d; unable to exec: '%.*s/%s' is too long of a file path name!\n", datetime(), config->name, config->pid, (int)(q - p), p, config->command);
 				exit(-ENAMETOOLONG);
 			}
 			q++;
@@ -242,11 +300,11 @@ void spin(struct child *config) {
 			case ENOTDIR:
 				break;
 			default:
-				fprintf(err, "execve(%s) failed: %s\n", config->command, strerror(errno));
+				fprintf(err, "init | [%s] exec %s pid %d; execve(%s) failed: %s\n", datetime(), config->name, config->pid, config->command, strerror(errno));
 				exit(-errno);
 			}
 		}
-		fprintf(err, "execve(%s) failed: executable not found in $PATH\n", config->command);
+		fprintf(err, "init | [%s] exec %s pid %d; execve(%s) failed: executable not found in $PATH\n", datetime(), config->name, config->pid, config->command);
 		if (saw_eaccess) {
 			fprintf(err, "  additionally, the following error was encountered: %s\n", strerror(EACCES));
 			exit(-EACCES);
@@ -254,7 +312,7 @@ void spin(struct child *config) {
 		exit(1);
 
 	} else {
-		fprintf(stderr, "init | [%s] exec pid %d `%s`\n", datetime(), config->pid, config->command);
+		fprintf(stderr, "init | [%s] exec %s pid %d `%s`\n", datetime(), config->name, config->pid, config->command);
 	}
 }
 
@@ -266,6 +324,7 @@ void reaper(int sig, siginfo_t *info, void *_)
 	while (kid) {
 		if (kid->pid == info->si_pid) {
 			int rc;
+			fprintf(stderr, "init | [%s] received SIGCHLD for %s pid %d\n", datetime(), kid->name, kid->pid);
 			waitpid(kid->pid, &rc, 0);
 			kid->pid = 0;
 			break;
@@ -371,20 +430,7 @@ int main(int argc, char **argv, char **envp)
 		}
 
 		while (CONFIG) {
-			printf("%s: %s ", CONFIG->argv[0], CONFIG->command);
-
-			for (int i = 1; CONFIG->argv[i]; i++) {
-				char *p;
-				const char *q = "";
-				for (p = CONFIG->argv[i]; *p; p++) {
-					if (isspace(*p)) {
-						q = "'";
-						break;
-					}
-				}
-				printf("%s%s%s ", q, CONFIG->argv[i], q);
-			}
-			printf("\n");
+			printf("%-20s | %s\n", CONFIG->name, CONFIG->full);
 			CONFIG = CONFIG->next;
 		}
 		exit(0);
