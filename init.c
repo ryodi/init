@@ -47,14 +47,14 @@ void format_datetime(char *buf, size_t n) {
 
 	rc = gettimeofday(&tv, NULL);
 	if (rc != 0) {
-		fprintf(stderr, "gettimeofday(): %s\n", strerror(errno));
+		fprintf(stderr, "init | gettimeofday() call failed: %s\n", strerror(errno));
 		strcpy(buf, "UNKNOWN");
 		return;
 	}
 
 	tm = localtime(&tv.tv_sec);
 	if (!tm) {
-		fprintf(stderr, "localtime(): %s\n", strerror(errno));
+		fprintf(stderr, "init | localtime() call failed: %s\n", strerror(errno));
 		strcpy(buf, "UNKNOWN");
 		return;
 	}
@@ -138,12 +138,12 @@ int configure_from_directory(struct child **chain, const char *root, char **envp
 
 	dir = opendir(root);
 	if (!dir) {
-		fprintf(stderr, "%s: %s\n", root, strerror(errno));
+		fprintf(stderr, "init | failed to list contents of %s: %s\n", root, strerror(errno));
 		return -1;
 	}
 	fd = dirfd(dir);
 	if (fd < 0) {
-		fprintf(stderr, "dirfd(%s): %s\n", root, strerror(errno));
+		fprintf(stderr, "init | dirfd(%s) call failed: %s\n", root, strerror(errno));
 		return -1;
 	}
 
@@ -152,7 +152,7 @@ int configure_from_directory(struct child **chain, const char *root, char **envp
 		struct stat st;
 		rc = fstatat(fd, ent->d_name, &st, 0);
 		if (rc < 0) {
-			fprintf(stderr, "fstat(%s%s%s): %s\n", root, sep, ent->d_name, strerror(errno));
+			fprintf(stderr, "init | fstat(%s%s%s) call failed: %s\n", root, sep, ent->d_name, strerror(errno));
 			return -1;
 		}
 		if (!S_ISREG(st.st_mode) || !(st.st_mode & 0111)) {
@@ -161,11 +161,11 @@ int configure_from_directory(struct child **chain, const char *root, char **envp
 
 		rc = snprintf(buf, PATH_MAX, "%s%s%s", root, sep, ent->d_name);
 		if (rc < 0) {
-			fprintf(stderr, "snprintf failed: %s\n", strerror(errno));
+			fprintf(stderr, "init | snprintf failed: %s\n", strerror(errno));
 			return -1;
 		}
 		if (rc >= PATH_MAX) {
-			fprintf(stderr, "snprintf failed: '%s/%s' exceeds PATH_MAX of %d\n", root, ent->d_name, PATH_MAX);
+			fprintf(stderr, "init | snprintf failed: '%s/%s' exceeds PATH_MAX of %d\n", root, ent->d_name, PATH_MAX);
 			return -1;
 		}
 
@@ -181,7 +181,7 @@ void spin(struct child *config) {
 	config->pid = fork();
 
 	if (config->pid < 0) {
-		fprintf(stderr, "fork failed: %s\n", strerror(errno));
+		fprintf(stderr, "init | fork failed: %s\n", strerror(errno));
 		return;
 	}
 
@@ -200,7 +200,7 @@ void spin(struct child *config) {
 			if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
 			err = fd < 0 ? NULL : fdopen(fd, "w");
 			if (!err) {
-				fprintf(stderr, "unable to duplicate stderr.  don't expect much in the way of error reporting from here on out...\n");
+				fprintf(stderr, "init | unable to duplicate stderr.  don't expect much in the way of error reporting from here on out...\n");
 				err = stderr; /* it's going to get silenced anyway... */
 			}
 
