@@ -278,14 +278,6 @@ static int RUNNING = 1;
 
 void terminator(int sig, siginfo_t *info, void *_) {
 	RUNNING = 0;
-	struct child *kid = CONFIG;
-	while (kid) {
-		if (kid->pid > 0) {
-			fprintf(stderr, "terminating pid %d...\n", kid->pid);
-			kill(SIGTERM, kid->pid);
-		}
-		kid = kid->next;
-	}
 	fprintf(stderr, "init | received signal %d; shutting down\n", sig);
 }
 
@@ -452,6 +444,13 @@ int main(int argc, char **argv, char **envp)
 	}
 #undef ms
 
+	while (CONFIG) {
+		if (CONFIG->pid > 0) {
+			fprintf(stderr, "init | [%s] terminating pid %d...\n", datetime(), CONFIG->pid);
+			kill(SIGTERM, CONFIG->pid);
+		}
+		CONFIG = CONFIG->next;
+	}
 
 	fprintf(stderr, "init | [%s] shutting down.\n", datetime());
 	return 0;
