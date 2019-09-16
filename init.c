@@ -40,6 +40,40 @@ struct child {
 	                    /* set to 0 for "not running"  */
 };
 
+void format_datetime(char *buf, size_t n) {
+	int rc;
+	struct tm *tm;
+	struct timeval tv;
+
+	rc = gettimeofday(&tv, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "gettimeofday(): %s\n", strerror(errno));
+		strcpy(buf, "UNKNOWN");
+		return;
+	}
+
+	tm = localtime(&tv.tv_sec);
+	if (!tm) {
+		fprintf(stderr, "localtime(): %s\n", strerror(errno));
+		strcpy(buf, "UNKNOWN");
+		return;
+	}
+
+	rc = strftime(buf, 64, "%Y-%m-%d %H:%M:%S", tm);
+	if (rc == 0) {
+		strcpy(buf, "DATE-TOO-LONG");
+		return;
+	}
+
+	snprintf(buf+rc, n - rc, ".%06li", tv.tv_usec);
+}
+
+static char NOW[64];
+const char * datetime() {
+	format_datetime(NOW, 64);
+	return NOW;
+}
+
 void append_command(struct child **chain, struct child **next, char *command, int argc, char **argv, char **envp) {
 	int i;
 
@@ -220,33 +254,7 @@ void spin(struct child *config) {
 		exit(1);
 
 	} else {
-		int rc;
-		struct tm *tm;
-		struct timeval tv;
-#define _DATE_BUF_SIZE 64
-		char now[_DATE_BUF_SIZE];
-
-		rc = gettimeofday(&tv, NULL);
-		if (rc != 0) {
-			fprintf(stderr, "gettimeofday(): %s\n", strerror(errno));
-			strcpy(now, "UNKNOWN");
-
-		} else {
-			tm = localtime(&tv.tv_sec);
-			if (!tm) {
-				fprintf(stderr, "localtime(): %s\n", strerror(errno));
-				strcpy(now, "UNKNOWN");
-
-			} else {
-				rc = strftime(now, 64, "%Y-%m-%d %H:%M:%S", tm);
-				if (rc == 0) {
-					strcpy(now, "DATE-TOO-LONG");
-				} else {
-					snprintf(now+rc, _DATE_BUF_SIZE - rc, ".%06li", tv.tv_usec);
-				}
-			}
-		}
-		fprintf(stderr, "[%s] exec pid %d `%s`\n", now, config->pid, config->command);
+		fprintf(stderr, "init | [%s] exec pid %d `%s`\n", datetime(), config->pid, config->command);
 	}
 }
 
@@ -278,7 +286,7 @@ void terminator(int sig, siginfo_t *info, void *_) {
 		}
 		kid = kid->next;
 	}
-	fprintf(stderr, "init shutting down.\n");
+	fprintf(stderr, "init | received signal %d; shutting down\n", sig);
 }
 
 int main(int argc, char **argv, char **envp)
@@ -391,7 +399,7 @@ int main(int argc, char **argv, char **envp)
 	}
 
 	if (!CONFIG) {
-		fprintf(stderr, "No sub-processes identified.\nWhat shall I supervise?\n");
+		fprintf(stderr, "init | no processes identified -- what shall I supervise?\n");
 		exit(1);
 	}
 
@@ -399,7 +407,7 @@ int main(int argc, char **argv, char **envp)
 	sa.sa_flags = SA_NOCLDSTOP | SA_SIGINFO;
 	rc = sigaction(SIGCHLD, &sa, NULL);
 	if (rc != 0) {
-		fprintf(stderr, "failed to set up SIGCLD handler: %s\n", strerror(errno));
+		fprintf(stderr, "init | failed to set up SIGCLD handler: %s\n", strerror(errno));
 		return 1;
 	}
 
@@ -407,12 +415,12 @@ int main(int argc, char **argv, char **envp)
 	sa.sa_flags = SA_SIGINFO;
 	rc = sigaction(SIGINT, &sa, NULL);
 	if (rc != 0) {
-		fprintf(stderr, "failed to set up SIGINT handler: %s\n", strerror(errno));
+		fprintf(stderr, "init | failed to set up SIGINT handler: %s\n", strerror(errno));
 		return 1;
 	}
 	rc = sigaction(SIGTERM, &sa, NULL);
 	if (rc != 0) {
-		fprintf(stderr, "failed to set up SIGTERM handler: %s\n", strerror(errno));
+		fprintf(stderr, "init | failed to set up SIGTERM handler: %s\n", strerror(errno));
 		return 1;
 	}
 
@@ -444,5 +452,7 @@ int main(int argc, char **argv, char **envp)
 	}
 #undef ms
 
+
+	fprintf(stderr, "init | [%s] shutting down.\n", datetime());
 	return 0;
 }
