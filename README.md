@@ -21,18 +21,19 @@ not link in any libraries -- perfect for using in a Docker image!
 Usage
 -----
 
-`init` operates in one of two modes: command-line or
-directory-backed.
+`init` can determine what processes to supervise via one or more
+directories (the `-d` flag), and / or by passing invocations on
+the command-line, spearated by `--` delimiters.
 
-In _command-line_ mode, `init` just reads the commands to execute
-from the arguments you pass to it.  For example:
+The easiest way is the latter.  For example:
 
     init -- /path/to/bin/first-process --foreground \
          -- /path/to/bin/second-process -f -l debug
 
-In _directory-backed_ mode, `init` reads a directory, looking for
-regular executable files (and symbolic links to the same) and
-executes those as commands, without any arguments:
+If you pass `init` a directory via the `-d` flag, it lists the
+contents of said directory, looking for regular, executable files
+(and symbolic links to the same).  Those scripts then get executed,
+without any arguments:
 
     # ls -l /services.d
     total 8
@@ -41,20 +42,27 @@ executes those as commands, without any arguments:
 
     # init -d /services.d
 
+You can freely mix these, assuming you pass all the directory
+flags first:
+
+    init -d /services.d \
+         -- /path/to/bin/first-process --foreground \
+         -- /path/to/bin/second-process -f -l debug
+
 The `init` command itself takes the following options:
 
-  -h, --help       Print out a help screen.
-  -v, --version    Print out the version of `init`
+    -h, --help       Print out a help screen.
+    -v, --version    Print out the version of `init`
 
-  -n, --dry-run    Parse and print commands to be run,
-                   but do not actually execute them.
+    -n, --dry-run    Parse and print commands to be run,
+                     but do not actually execute them.
 
-  -q, --quiet      Suppress output from a --dry-run.
+    -q, --quiet      Suppress output from a --dry-run.
 
-  -d, --directory  Process all regular executable files
-                   (and symbolic links to the same) in a
-                   given directory.  Can be used more
-                   than once.
+    -d, --directory  Process all regular executable files
+                     (and symbolic links to the same) in a
+                     given directory.  Can be used more
+                     than once.
 
 Contributing
 ------------
@@ -65,6 +73,5 @@ About
 -----
 
 Everyone writes a supervisor, right?  It's like blog software was
-in the early aughts.  Why did I write this one?  I needed
-something small for RYODI.  Yes, I know about openrc.  Yes, I
-know about supervisord.  I like this version.  Because I wrote it.
+in the early aughts.  Why did I write this one?  RYODI needed
+something small, compact, and capable.
