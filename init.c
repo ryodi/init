@@ -13,6 +13,8 @@
 #include <sys/time.h>
 #include <dirent.h>
 #include <getopt.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #define VERSION "2.0"
 
@@ -340,25 +342,286 @@ void terminator(int sig, siginfo_t *info, void *_) {
 	fprintf(stderr, "init | received signal %d; shutting down\n", sig);
 }
 
+const char * facility(int f) {
+	switch (f) {
+	case 0:  return "kern";
+	case 1:  return "user";
+	case 2:  return "mail";
+	case 3:  return "system";
+	case 4:  return "daemon";
+	case 5:  return "syslog";
+	case 6:  return "lpd";
+	case 7:  return "nntp";
+	case 8:  return "uucp";
+	case 9:  return "clock";
+	case 10: return "auth";
+	case 11: return "ftp";
+	case 12: return "ntp";
+	case 13: return "audit";
+	case 14: return "alert";
+	case 15: return "clock";
+	case 16: return "local0";
+	case 17: return "local1";
+	case 18: return "local2";
+	case 19: return "local3";
+	case 20: return "local4";
+	case 21: return "local5";
+	case 22: return "local6";
+	case 23: return "local7";
+	default: return "unknown";
+	}
+}
+
+const char * severity(int s) {
+	switch (s) {
+	case 0:  return "emerg";
+	case 1:  return "alert";
+	case 2:  return "crit";
+	case 3:  return "error";
+	case 4:  return "warn";
+	case 5:  return "notice";
+	case 6:  return "info";
+	case 7:  return "debug";
+	default: return "unknown";
+	}
+}
+
+static int parse_month(const char *s, size_t n) {
+	if (n < 3) return -1;
+
+	switch (*s++) {
+	default: goto fail;
+	case 'J': case 'j':
+		switch (*s++) {
+		default: goto fail;
+		case 'A': case 'a':
+			switch (*s++) {
+			default: goto fail;
+			case 'N': case 'n': return 0;
+			}
+		case 'U': case 'u':
+			switch (*s++) {
+			default: goto fail;
+			case 'N': case 'n': return 5;
+			case 'L': case 'l': return 6;
+			}
+		}
+
+	case 'F': case 'f':
+		switch (*s++) {
+		default: goto fail;
+		case 'E': case 'e':
+			switch (*s++) {
+			default: goto fail;
+			case 'B': case 'b': return 1;
+			}
+		}
+
+	case 'M': case 'm':
+		switch (*s++) {
+		default: goto fail;
+		case 'A': case 'a':
+			switch (*s++) {
+			default: goto fail;
+			case 'R': case 'r': return 2;
+			case 'Y': case 'y': return 4;
+			}
+		}
+
+	case 'A': case 'a':
+		switch (*s++) {
+		default: goto fail;
+		case 'P': case 'p':
+			switch (*s++) {
+			default: goto fail;
+			case 'R': case 'r': return 3;
+			}
+		case 'U': case 'u':
+			switch (*s++) {
+			default: goto fail;
+			case 'G': case 'g': return 7;
+			}
+		}
+
+	case 'S': case 's':
+		switch (*s++) {
+		default: goto fail;
+		case 'E': case 'e':
+			switch (*s++) {
+			default: goto fail;
+			case 'P': case 'p': return 8;
+			}
+		}
+
+	case 'O': case 'o':
+		switch (*s++) {
+		default: goto fail;
+		case 'C': case 'c':
+			switch (*s++) {
+			default: goto fail;
+			case 'T': case 't': return 9;
+			}
+		}
+
+	case 'N': case 'n':
+		switch (*s++) {
+		default: goto fail;
+		case 'O': case 'o':
+			switch (*s++) {
+			default: goto fail;
+			case 'V': case 'v': return 10;
+			}
+		}
+
+	case 'D': case 'd':
+		switch (*s++) {
+		default: goto fail;
+		case 'E': case 'e':
+			switch (*s++) {
+			default: goto fail;
+			case 'C': case 'c': return 11;
+			}
+		}
+	}
+
+fail:
+	return -1;
+}
+
+int drain_syslog(const char *log, int raw) {
+	int fd, rc;
+	struct sockaddr_un addr;
+
+	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		fprintf(stderr, "syslog | failed to create unix socket: %s\n", strerror(errno));
+		return 1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, log, sizeof(addr.sun_path));
+	unlink(log);
+
+	umask(0);
+	rc = bind(fd, (struct sockaddr *)(&addr), sizeof(addr));
+	if (rc < 0) {
+		fprintf(stderr, "syslog | failed to bind unix socket %s: %s\n", log, strerror(errno));
+		return 1;
+	}
+
+	while (RUNNING) {
+		int n, prio, year = 0, fac, sev;
+		char *p, buf[8192];
+		struct tm tm;
+
+		n = recvfrom(fd, buf, 8192, 0, NULL, NULL);
+		if (n < 0) {
+			if (errno == EINTR) break;
+			fprintf(stderr, "syslog | failed to read from unix socket %s: %s\n", log, strerror(errno));
+			return 1;
+		}
+		buf[n] = '\0';
+
+		for (; n && buf[n - 1] == '\0'; --n);
+		if (!n) goto unknown;
+
+		if (raw) {
+			fprintf(stderr, "syslog | RAW:%s\n", buf);
+		}
+
+		/* HEADER = PRI VERSION SP TIMESTAMP SP HOSTNAME
+		            SP APP-NAME SP PROCID SP MSGID             */
+		p = buf;
+#define dshift(d,c) ((d) = (d) * 10 + ((c) - '0'))
+		if (*p++ != '<') goto unknown;
+		for (prio = 0; isdigit(*p); dshift(prio, *p), p++);
+		if (*p++ != '>') goto unknown;
+
+		sev = (prio & 0x07);
+		fac = (prio & 0xff) >> 3;
+
+		memset(&tm, 0, sizeof(tm));
+		tm.tm_mon = parse_month(p, buf+8192-p);
+		if (tm.tm_mon >= 0) {
+			/* old format: <13>Sep 18 16:37:09 root: the test message */
+			p += 3;
+			if (*p++ != ' ') goto unknown;
+			for (tm.tm_mday = 0; isdigit(*p); dshift(tm.tm_mday, *p), p++);
+			if (*p++ != ' ') goto unknown;
+			for (tm.tm_hour = 0; isdigit(*p); dshift(tm.tm_hour, *p), p++);
+			if (*p++ != ':') goto unknown;
+			for (tm.tm_min = 0; isdigit(*p); dshift(tm.tm_min, *p), p++);
+			if (*p++ != ':') goto unknown;
+			for (tm.tm_sec = 0; isdigit(*p); dshift(tm.tm_sec, *p), p++);
+			if (*p++ != ' ') goto unknown;
+
+			time_t now;
+			now = time(NULL);
+			if (!localtime_r(&now, &tm)) {
+				fprintf(stderr, "syslog | failed to get localtime(): %s\n", strerror(errno));
+			} else {
+				year = tm.tm_year + 1900;
+			}
+
+			char ftime[256];
+			if (strftime(ftime, 256, "%Y-%m-%dT%H:%M:%S.------+--:--", &tm) == 0) {
+				strcpy(ftime, "YYYY-MM-DDTHH:MM:SS.------+--:--");
+			}
+			fprintf(stderr, "[%s] %s.%s: %s\n", ftime, facility(fac), severity(sev), p);
+
+		} else if (*p == '1') {
+			/* new format: <13>1 2019-09-18T16:37:39.625645+00:00 a08374e6c309 root - - \
+			                     [... structured ...] the test message */
+			p++;
+			if (*p++ != ' ') goto unknown;
+
+			int i;
+			char ftime[256];
+			memset(ftime, 0, 256);
+			for (i = 0; i < 255; i++) {
+				ftime[i] = *p++;
+				if (ftime[i] == ' ') {
+					ftime[i] = '\0';
+					break;
+				}
+			}
+			p++;
+			fprintf(stderr, "[%s] %s.%s: %s\n", ftime, facility(fac), severity(sev), p);
+
+		} else {
+unknown:
+			fprintf(stderr, "syslog | UNRECOGNIZED FORMAT (at offset %li: '%s')\n", p-buf, p);
+			fprintf(stderr, "%s\n", buf);
+		}
+	}
+
+	return 0;
+}
+
 int main(int argc, char **argv, char **envp)
 {
 	struct sigaction sa;
 	struct timespec nap;
 	int rc;
 	int quiet = 0;
+	int rawlog = 0;
 	int dry_run = 0;
+	const char *log = "/dev/log";
 
 	CONFIG = NULL;
 
 	for (;;) {
 		int c, idx = 0;
-		const char *shorts = "hvnqd:";
+		const char *shorts = "hvnqd:L:";
 		static struct option longs[] = {
 			{"help",       no_argument,       0,  'h' },
 			{"version",    no_argument,       0,  'v' },
 			{"dry-run",    no_argument,       0,  'n' },
 			{"quiet",      no_argument,       0,  'q' },
 			{"directory",  required_argument, 0,  'd' },
+			{"log",        required_argument, 0,  'L' },
+			{"raw-log",    required_argument, 0,   1  },
 			{0, 0, 0,  0 }
 		};
 
@@ -383,6 +646,11 @@ int main(int argc, char **argv, char **envp)
 			       "                   (and symbolic links to the same) in a\n"
 			       "                   given directory.  Can be used more\n"
 			       "                   than once.\n"
+			       "\n"
+			       "  -L, --log        Path to the /dev/log socket, or \"\"\n"
+			       "                   to skip container syslog drain.\n"
+			       "\n"
+			       "      --raw-log    Always dump raw syslog messages.\n"
 			       "\n");
 			exit(0);
 
@@ -403,6 +671,14 @@ int main(int argc, char **argv, char **envp)
 			if (rc != 0) {
 				exit(1);
 			}
+			break;
+
+		case 'L':
+			log = optarg;
+			break;
+
+		case 1:
+			rawlog = 1;
 			break;
 		}
 	}
@@ -441,14 +717,6 @@ int main(int argc, char **argv, char **envp)
 		exit(1);
 	}
 
-	sa.sa_sigaction = reaper;
-	sa.sa_flags = SA_NOCLDSTOP | SA_SIGINFO;
-	rc = sigaction(SIGCHLD, &sa, NULL);
-	if (rc != 0) {
-		fprintf(stderr, "init | failed to set up SIGCLD handler: %s\n", strerror(errno));
-		return 1;
-	}
-
 	sa.sa_sigaction = terminator;
 	sa.sa_flags = SA_SIGINFO;
 	rc = sigaction(SIGINT, &sa, NULL);
@@ -459,6 +727,31 @@ int main(int argc, char **argv, char **envp)
 	rc = sigaction(SIGTERM, &sa, NULL);
 	if (rc != 0) {
 		fprintf(stderr, "init | failed to set up SIGTERM handler: %s\n", strerror(errno));
+		return 1;
+	}
+
+	if (log && *log) {
+		pid_t pid;
+
+		pid = fork();
+		if (pid < 0) {
+			fprintf(stderr, "init | unable to fork syslog drain: %s\n", strerror(errno));
+			return 1;
+		}
+
+		if (pid == 0) {
+			fprintf(stderr, "init | draining syslog from %s...\n", log);
+			drain_syslog(log, rawlog);
+			fprintf(stderr, "init | syslog drain terminated.\n");
+			return 0;
+		}
+	}
+
+	sa.sa_sigaction = reaper;
+	sa.sa_flags = SA_NOCLDSTOP | SA_SIGINFO;
+	rc = sigaction(SIGCHLD, &sa, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "init | failed to set up SIGCLD handler: %s\n", strerror(errno));
 		return 1;
 	}
 
